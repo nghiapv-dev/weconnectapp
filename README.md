@@ -76,10 +76,7 @@ service firebase.storage {
 
 ```bash
 npm run dev
-# hoặc
-yarn dev
 ```
-
 Ứng dụng sẽ chạy tại `http://localhost:5173`
 
 #### Production build:
