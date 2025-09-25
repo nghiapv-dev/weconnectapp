@@ -4,7 +4,6 @@ import { auth } from "./firebase";
 export const useUserStore = create((set) => ({
   currentUser: null,
   isLoading: true,
-  // Function lấy thông tin user từ Firestore hoặc tạo mới
   fetchUserInfo: async (uid) => {
     if (!uid) return set({ currentUser: null, isLoading: false });
 
@@ -36,12 +35,53 @@ export const useUserStore = create((set) => ({
         const userData = docSnap.data();
         console.log("User data loaded from Firestore:", userData);
 
-        // Cập nhật trạng thái online
+        // Cập nhật trạng thái online và setup disconnect listener
         try {
-          const { updateDoc } = await import("firebase/firestore");
-          await updateDoc(docRef, { online: true });
+          const { updateDoc, serverTimestamp } = await import(
+            "firebase/firestore"
+          );
+          const {
+            getDatabase,
+            ref,
+            onDisconnect,
+            set: dbSet,
+          } = await import("firebase/database");
+
+          await updateDoc(docRef, {
+            online: true,
+            lastSeen: serverTimestamp(),
+          });
           console.log("Updated online status to true");
           userData.online = true;
+
+          // Setup Firebase Realtime Database presence
+          const rtdb = getDatabase();
+          const userStatusRef = ref(rtdb, `/status/${uid}`);
+          const userFirestoreRef = doc(db, "users", uid);
+
+          // Set online status in Realtime Database
+          await dbSet(userStatusRef, {
+            online: true,
+            lastSeen: serverTimestamp(),
+          });
+
+          // Setup disconnect listener
+          onDisconnect(userStatusRef)
+            .set({
+              online: false,
+              lastSeen: serverTimestamp(),
+            })
+            .then(() => {
+              console.log("Disconnect listener set up successfully");
+            });
+
+          // Also update Firestore on disconnect
+          onDisconnect(userStatusRef).then(() => {
+            updateDoc(userFirestoreRef, {
+              online: false,
+              lastSeen: serverTimestamp(),
+            }).catch(console.error);
+          });
         } catch (updateError) {
           console.log("Failed to update online status:", updateError);
         }

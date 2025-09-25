@@ -5,8 +5,12 @@ export const useChatStore = create((set) => ({
   user: null,
   isCurrentUserBlocked: false,
   isReceiverBlocked: false,
+  isGroup: false,
+  groupName: null,
+  groupAdmin: null,
+  groupMembers: [],
   // Function thay đổi chat hiện tại và kiểm tra trạng thái block
-  changeChat: (chatId, user) => {
+  changeChat: (chatId, user, chatData = {}) => {
     const currentUser = useUserStore.getState().currentUser;
 
     // Nếu không có user hiện tại, reset tất cả state
@@ -16,10 +20,28 @@ export const useChatStore = create((set) => ({
         user: null,
         isCurrentUserBlocked: false,
         isReceiverBlocked: false,
+        isGroup: false,
+        groupName: null,
+        groupAdmin: null,
+        groupMembers: [],
       });
     }
 
-    // Lấy danh sách bị block của cả hai user
+    // Nếu là group chat
+    if (chatData.isGroup) {
+      return set({
+        chatId,
+        user: null,
+        isCurrentUserBlocked: false,
+        isReceiverBlocked: false,
+        isGroup: true,
+        groupName: chatData.groupName,
+        groupAdmin: chatData.groupAdmin,
+        groupMembers: chatData.members || [],
+      });
+    }
+
+    // Lấy danh sách bị block của cả hai user (individual chat)
     const userBlocked = user?.blocked || [];
     const currentUserBlocked = currentUser?.blocked || [];
 
@@ -30,6 +52,10 @@ export const useChatStore = create((set) => ({
         user: null,
         isCurrentUserBlocked: true,
         isReceiverBlocked: false,
+        isGroup: false,
+        groupName: null,
+        groupAdmin: null,
+        groupMembers: [],
       });
     }
     // Kiểm tra nếu user hiện tại đã block người kia
@@ -39,6 +65,10 @@ export const useChatStore = create((set) => ({
         user: user,
         isCurrentUserBlocked: false,
         isReceiverBlocked: true,
+        isGroup: false,
+        groupName: null,
+        groupAdmin: null,
+        groupMembers: [],
       });
     }
     // Trường hợp bình thường, không ai block ai
@@ -48,6 +78,10 @@ export const useChatStore = create((set) => ({
         user,
         isCurrentUserBlocked: false,
         isReceiverBlocked: false,
+        isGroup: false,
+        groupName: null,
+        groupAdmin: null,
+        groupMembers: [],
       });
     }
   },
@@ -64,6 +98,10 @@ export const useChatStore = create((set) => ({
       user: null,
       isCurrentUserBlocked: false,
       isReceiverBlocked: false,
+      isGroup: false,
+      groupName: null,
+      groupAdmin: null,
+      groupMembers: [],
     });
   },
 }));

@@ -2,10 +2,12 @@ import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
+import { getDatabase } from "firebase/database";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_API_KEY,
   authDomain: "chat-app-5209e.firebaseapp.com",
+  databaseURL: "https://chat-app-5209e-default-rtdb.firebaseio.com/",
   projectId: "chat-app-5209e",
   storageBucket: "chat-app-5209e.firebasestorage.app",
   messagingSenderId: "1070334476440",
@@ -20,3 +22,5 @@ export const auth = getAuth(app);
 export const db = getFirestore(app);
 
 export const storage = getStorage(app);
+
+export const database = getDatabase(app);

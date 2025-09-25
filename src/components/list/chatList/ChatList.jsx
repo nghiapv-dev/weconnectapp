@@ -1,17 +1,23 @@
 import { useEffect, useState } from "react";
 import AddUser from "./addUser/addUser";
+import CreateGroup from "./createGroup/CreateGroup";
+import { toast } from "react-toastify";
 import { useUserStore } from "../../../lib/userStore";
 import { doc, getDoc, onSnapshot, updateDoc } from "firebase/firestore";
 import { db } from "../../../lib/firebase";
 import { useChatStore } from "../../../lib/chatStore";
+import { getDatabase, ref, onValue, off } from "firebase/database";
 
 const ChatList = ({ onSelectChat }) => {
   const [chats, setChats] = useState([]);
   const [addMode, setAddMode] = useState(false);
+  const [createGroupMode, setCreateGroupMode] = useState(false);
   const [input, setInput] = useState("");
+  const [onlineUsers, setOnlineUsers] = useState({}); // Track online users
   const [contextMenu, setContextMenu] = useState({
     show: false,
     x: 0,
+
     y: 0,
     chatId: null,
   });
@@ -39,9 +45,27 @@ const ChatList = ({ onSelectChat }) => {
           }
 
           const items = data.chats;
+          console.log("Raw chats from Firebase:", items);
+
+          // Filter ra những chat có clearHistoryFrom (tạm ẩn cho đến khi có tin nhắn mới)
+          const activeChats = items.filter(chat => {
+            const isHistoryCleared = chat.clearHistoryFrom && chat.clearedBy === currentUser.id;
+            if (isHistoryCleared) {
+              // Chỉ ẩn nếu không có tin nhắn mới sau khi clear
+              const hasNewMessages = chat.updatedAt > chat.clearHistoryFrom;
+              if (!hasNewMessages) {
+                console.log("Hiding chat with cleared history:", chat.chatId);
+                return false;
+              }
+              console.log("Showing chat with new messages after clear:", chat.chatId);
+            }
+            return true;
+          });
+
+          console.log("Active chats after filtering:", activeChats);
 
           // Lấy thông tin user cho từng chat
-          const promises = items.map(async (item) => {
+          const promises = activeChats.map(async (item) => {
             try {
               const userDocRef = doc(db, "users", item.receiverId);
               const userDocSnap = await getDoc(userDocRef);
@@ -76,6 +100,55 @@ const ChatList = ({ onSelectChat }) => {
     };
   }, [currentUser?.id]);
 
+  // Real-time presence listener từ Realtime Database
+  useEffect(() => {
+    if (!chats.length) return;
+
+    try {
+      const rtdb = getDatabase();
+      const statusListeners = [];
+
+      // Lắng nghe online status cho tất cả users trong chat list
+      chats.forEach((chat) => {
+        if (chat.user?.id || chat.receiverId) {
+          const userId = chat.user?.id || chat.receiverId;
+          const statusRef = ref(rtdb, `/status/${userId}`);
+          
+          const unsubscribe = onValue(statusRef, (snapshot) => {
+            const status = snapshot.val();
+            setOnlineUsers(prev => ({
+              ...prev,
+              [userId]: status?.online === true
+            }));
+          }, (error) => {
+            console.log("Realtime Database not setup, using fallback:", error);
+            // Fallback: dùng online status từ Firestore
+            setOnlineUsers(prev => ({
+              ...prev,
+              [userId]: chat.user?.online === true
+            }));
+          });
+
+          statusListeners.push(() => off(statusRef, 'value', unsubscribe));
+        }
+      });
+
+      // Cleanup function
+      return () => {
+        statusListeners.forEach(cleanup => cleanup());
+      };
+    } catch (error) {
+      console.log("Realtime Database error, using Firestore online status:", error);
+      // Fallback to Firestore online status
+      const fallbackStatus = {};
+      chats.forEach(chat => {
+        const userId = chat.user?.id || chat.receiverId;
+        fallbackStatus[userId] = chat.user?.online === true;
+      });
+      setOnlineUsers(fallbackStatus);
+    }
+  }, [chats]);
+
   const handleSelect = async (chat) => {
     // Tạo bản copy của chats để update trạng thái đã đọc
     const userChats = chats.map((item) => {
@@ -96,8 +169,18 @@ const ChatList = ({ onSelectChat }) => {
       await updateDoc(userChatsRef, {
         chats: userChats,
       });
-      // Chuyển sang chat được chọn
-      changeChat(chat.chatId, chat.user);
+      
+      // Chuyển sang chat được chọn - group hoặc individual
+      if (chat.isGroup) {
+        changeChat(chat.chatId, null, {
+          isGroup: true,
+          groupName: chat.groupName,
+          groupAdmin: chat.groupAdmin,
+          members: chat.members
+        });
+      } else {
+        changeChat(chat.chatId, chat.user);
+      }
 
       // Gọi callback cho mobile navigation nếu có
       if (onSelectChat) {
@@ -109,21 +192,46 @@ const ChatList = ({ onSelectChat }) => {
   };
 
   // Lọc chat theo từ khóa tìm kiếm
-  const filteredChats = chats.filter((c) =>
-    c.user.username.toLowerCase().includes(input.toLowerCase()),
-  );
+  const filteredChats = chats.filter((c) => {
+    const searchTerm = input.toLowerCase();
+    if (c.isGroup) {
+      return c.groupName?.toLowerCase().includes(searchTerm);
+    } else {
+      return c.user?.username?.toLowerCase().includes(searchTerm);
+    }
+  });
 
-  // Xử lý hiển thị context menu khi click icon 3 chấm
+  // Xử lý hiển thị context menu khi click icon 3 chấm với tối ưu vị trí
   const handleContextMenu = (e, chat) => {
     e.preventDefault();
     e.stopPropagation();
 
     // Tính toán vị trí hiển thị menu dựa trên vị trí button
     const rect = e.currentTarget.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const menuWidth = 240;
+    const menuHeight = 400;
+
+    let x = rect.left - 200;
+    let y = rect.top - 10;
+
+    // Điều chỉnh vị trí nếu menu bị tràn ra ngoài viewport
+    if (x < 10) {
+      x = rect.right + 10;
+    }
+    if (x + menuWidth > viewportWidth) {
+      x = viewportWidth - menuWidth - 10;
+    }
+
+    if (y + menuHeight > viewportHeight) {
+      y = Math.max(10, viewportHeight - menuHeight - 10);
+    }
+
     setContextMenu({
       show: true,
-      x: rect.left - 200, // Position menu to the left of button
-      y: rect.top - 10, // Position menu aligned with top of button
+      x: Math.max(x, 10),
+      y: Math.max(y, 10),
       chatId: chat.chatId,
       chatUser: chat.user,
     });
@@ -192,16 +300,30 @@ const ChatList = ({ onSelectChat }) => {
     try {
       setContextMenu({ show: false, x: 0, y: 0, chatId: null });
 
-      // Lấy danh sách chat hiện tại và xóa chat được chọn
+      console.log("Deleting chat:", chatId, "for user:", currentUser.id);
+
+      // Soft Delete: Chỉ ẩn chat cho user hiện tại, không xóa hoàn toàn
       const userChatsRef = doc(db, "userchats", currentUser.id);
       const userChatsSnap = await getDoc(userChatsRef);
 
       if (userChatsSnap.exists()) {
         const currentChats = userChatsSnap.data().chats || [];
-        // Lọc bỏ chat cần xóa
-        const updatedChats = currentChats.filter(
-          (chat) => chat.chatId !== chatId,
-        );
+        console.log("Current chats before delete:", currentChats);
+        
+        // Thêm field "clearHistoryFrom" để clear messages từ thời điểm này
+        const updatedChats = currentChats.map((chat) => {
+          if (chat.chatId === chatId) {
+            console.log("Clearing chat history for:", chat.chatId);
+            return {
+              ...chat,
+              clearHistoryFrom: Date.now(), // Clear messages từ thời điểm này
+              clearedBy: currentUser.id,    // Ai là người clear
+            };
+          }
+          return chat;
+        });
+
+        console.log("Updated chats after soft delete:", updatedChats);
 
         await updateDoc(userChatsRef, {
           chats: updatedChats,
@@ -214,8 +336,10 @@ const ChatList = ({ onSelectChat }) => {
       }
 
       setDeleteConfirm({ show: false, chatId: null, chatUser: null });
+      toast.success("Đã xóa lịch sử trò chuyện");
     } catch (error) {
       console.error("Error deleting chat:", error);
+      toast.error("Không thể xóa cuộc trò chuyện");
     }
   };
 
@@ -244,25 +368,49 @@ const ChatList = ({ onSelectChat }) => {
             <h2 className="text-lg font-bold text-white md:text-xl">
               Messages
             </h2>
-            <button
-              className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-xl border border-blue-400/30 bg-gradient-to-r from-blue-500 to-blue-600 shadow-lg shadow-blue-500/25 transition-all duration-200 hover:scale-105 hover:from-blue-600 hover:to-blue-700 hover:shadow-blue-500/40 md:h-10 md:w-10"
-              onClick={() => setAddMode((prev) => !prev)}
-              title={addMode ? "Cancel" : "Add new conversation"}
-            >
-              <svg
-                className={`h-4 w-4 text-white transition-transform duration-200 md:h-5 md:w-5 ${addMode ? "rotate-45" : ""}`}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+            <div className="flex items-center gap-2">
+              {/* Button tạo nhóm */}
+              <button
+                className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-xl border border-green-400/30 bg-gradient-to-r from-green-500 to-green-600 shadow-lg shadow-green-500/25 transition-all duration-200 hover:scale-105 hover:from-green-600 hover:to-green-700 hover:shadow-green-500/40 md:h-10 md:w-10"
+                onClick={() => setCreateGroupMode((prev) => !prev)}
+                title={createGroupMode ? "Cancel" : "Create group chat"}
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 6v6m0 0v6m0-6h6m-6 0H6"
-                />
-              </svg>
-            </button>
+                <svg
+                  className={`h-4 w-4 text-white transition-transform duration-200 md:h-5 md:w-5 ${createGroupMode ? "rotate-45" : ""}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"
+                  />
+                </svg>
+              </button>
+              
+              {/* Button thêm bạn */}
+              <button
+                className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-xl border border-blue-400/30 bg-gradient-to-r from-blue-500 to-blue-600 shadow-lg shadow-blue-500/25 transition-all duration-200 hover:scale-105 hover:from-blue-600 hover:to-blue-700 hover:shadow-blue-500/40 md:h-10 md:w-10"
+                onClick={() => setAddMode((prev) => !prev)}
+                title={addMode ? "Cancel" : "Add new conversation"}
+              >
+                <svg
+                  className={`h-4 w-4 text-white transition-transform duration-200 md:h-5 md:w-5 ${addMode ? "rotate-45" : ""}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 6v6m0 0v6m0-6h6m-6 0H6"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-3 rounded-xl border border-slate-600/30 bg-slate-700/50 p-3 backdrop-blur-sm transition-all duration-200 focus-within:border-slate-500/50 focus-within:bg-slate-700/70">
@@ -347,25 +495,52 @@ const ChatList = ({ onSelectChat }) => {
                 onClick={() => handleSelect(chat)}
               >
                 <div className="relative">
-                  <img
-                    src={
-                      chat.user?.blocked?.includes(currentUser?.id)
-                        ? "./avatar.png"
-                        : chat.user?.avatar || "./avatar.png"
-                    }
-                    alt=""
-                    className="h-12 w-12 rounded-full border-2 border-slate-600 object-cover transition-colors group-hover:border-slate-500 md:h-14 md:w-14"
-                  />
-                  {chat.user?.online && (
-                    <span className="absolute -right-1 -bottom-1 h-3 w-3 rounded-full border-2 border-slate-800 bg-green-500 shadow-[0_0_8px_#10b981] md:h-4 md:w-4"></span>
+                  {chat.isGroup ? (
+                    <div className="relative h-12 w-12 md:h-14 md:w-14">
+                      {/* Group avatar - có thể là avatar của nhóm hoặc icon */}
+                      <div className="flex h-full w-full items-center justify-center rounded-full border-2 border-slate-600 bg-gradient-to-br from-green-500 to-blue-600 text-white transition-colors group-hover:border-slate-500">
+                        <svg className="h-6 w-6 md:h-8 md:w-8" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M16 4c0-1.11.89-2 2-2s2 .89 2 2-.89 2-2 2-2-.89-2-2zM4 18v-4h3v4H4zM14 6.26V9h7v5h-2v4h3v-4h2V9c0-1.11-.89-2-2-2H14v-.74zM12.5 11.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5S11 9.17 11 10s.67 1.5 1.5 1.5zM8.5 11.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5S7 9.17 7 10s.67 1.5 1.5 1.5z"/>
+                        </svg>
+                      </div>
+                      {/* Group member count */}
+                      <span className="absolute -right-1 -bottom-1 rounded-full bg-blue-500 px-1.5 py-0.5 text-xs font-medium text-white shadow-md">
+                        {chat.members ? chat.members.length : 0}
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      <img
+                        src={
+                          chat.user?.blocked?.includes(currentUser?.id)
+                            ? "./avatar.png"
+                            : chat.user?.avatar || "./avatar.png"
+                        }
+                        alt=""
+                        className="h-12 w-12 rounded-full border-2 border-slate-600 object-cover transition-colors group-hover:border-slate-500 md:h-14 md:w-14"
+                      />
+                      {/* Online status từ Realtime Database thay vì Firestore */}
+                      {onlineUsers[chat.user?.id || chat.receiverId] && (
+                        <span className="absolute -right-1 -bottom-1 h-3 w-3 rounded-full border-2 border-slate-800 bg-green-500 shadow-[0_0_8px_#10b981] md:h-4 md:w-4"></span>
+                      )}
+                    </>
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="mb-1 flex items-center justify-between md:mb-2">
                     <span className="truncate text-sm font-semibold text-white transition-colors group-hover:text-blue-300 md:text-base">
-                      {chat.user?.blocked?.includes(currentUser?.id)
-                        ? "User"
-                        : chat.user?.username || "Unknown User"}
+                      {chat.isGroup ? (
+                        <span className="flex items-center gap-1">
+                          <svg className="h-3 w-3 text-green-400" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M16 4c0-1.11.89-2 2-2s2 .89 2 2-.89 2-2 2-2-.89-2-2zM4 18v-4h3v4H4zM14 6.26V9h7v5h-2v4h3v-4h2V9c0-1.11-.89-2-2-2H14v-.74zM12.5 11.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5S11 9.17 11 10s.67 1.5 1.5 1.5zM8.5 11.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5S7 9.17 7 10s.67 1.5 1.5 1.5z"/>
+                          </svg>
+                          {chat.groupName}
+                        </span>
+                      ) : (
+                        chat.user?.blocked?.includes(currentUser?.id)
+                          ? "User"
+                          : chat.user?.username || "Unknown User"
+                      )}
                     </span>
                     <span className="text-xs text-gray-400 transition-colors group-hover:text-gray-300">
                       {chat.updatedAt
@@ -418,10 +593,14 @@ const ChatList = ({ onSelectChat }) => {
       {/* Context Menu - Menu chuột phải với các tùy chọn */}
       {contextMenu.show && (
         <div
-          className="animate-in fade-in-0 zoom-in-95 fixed z-50 min-w-[240px] rounded-lg border border-gray-200 bg-white py-1 shadow-xl duration-200"
+          className="fixed z-50 w-64 rounded-lg border border-gray-200 bg-white shadow-xl"
           style={{
-            left: `${Math.max(contextMenu.x, 10)}px`,
-            top: `${Math.max(contextMenu.y, 10)}px`,
+            left: `${contextMenu.x}px`,
+            top: `${contextMenu.y}px`,
+            height: "300px",
+            maxHeight: "70vh",
+            overflowY: "scroll",
+            overflowX: "hidden",
           }}
         >
           {/* Nhóm 1: Đánh dấu và thông báo */}
@@ -622,6 +801,17 @@ const ChatList = ({ onSelectChat }) => {
             </svg>
             Báo cáo
           </button>
+
+          {/* Debug items to test scroll */}
+          {/* <button className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm font-medium text-gray-800 hover:bg-gray-50">
+            <span>🔧</span> Test Scroll 1
+          </button>
+          <button className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm font-medium text-gray-800 hover:bg-gray-50">
+            <span>⚡</span> Test Scroll 2
+          </button>
+          <button className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm font-medium text-gray-800 hover:bg-gray-50">
+            <span>🎨</span> Test Scroll 3
+          </button> */}
         </div>
       )}
 
@@ -683,6 +873,7 @@ const ChatList = ({ onSelectChat }) => {
       )}
 
       {addMode && <AddUser setAddMode={setAddMode} />}
+      {createGroupMode && <CreateGroup setCreateGroupMode={setCreateGroupMode} />}
     </div>
   );
 };

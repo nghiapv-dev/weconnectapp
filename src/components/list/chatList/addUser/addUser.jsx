@@ -13,19 +13,23 @@ import {
 } from "firebase/firestore";
 import { useState } from "react";
 import { useUserStore } from "../../../../lib/userStore";
+import { useChatStore } from "../../../../lib/chatStore";
 import { toast } from "react-toastify";
 
 const AddUser = ({ setAddMode }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [chatStatus, setChatStatus] = useState(null); // 'none', 'exists', 'cleared'
 
   const { currentUser } = useUserStore();
+  const { changeChat } = useChatStore();
 
   // Function tìm kiếm user theo username
   const handleSearch = async (e) => {
     e.preventDefault();
     setLoading(true);
     setUser(null);
+    setChatStatus(null);
 
     // Lấy username từ form
     const formData = new FormData(e.target);
@@ -47,6 +51,9 @@ const AddUser = ({ setAddMode }) => {
         const foundUser = querySnapShot.docs[0].data();
         setUser(foundUser);
         console.log("Người dùng được tìm thấy trong Firestore:", foundUser);
+        
+        // Kiểm tra trạng thái chat với user này
+        await checkChatStatus(foundUser.id);
       } else {
         toast.info("Không tìm thấy người dùng với tên đó");
       }
@@ -76,6 +83,68 @@ const AddUser = ({ setAddMode }) => {
     setLoading(false);
   };
 
+  // Function kiểm tra trạng thái chat với user
+  const checkChatStatus = async (userId) => {
+    try {
+      const userChatsRef = doc(db, "userchats", currentUser.id);
+      const userChatsDoc = await getDoc(userChatsRef);
+      
+      if (userChatsDoc.exists()) {
+        const currentUserChats = userChatsDoc.data().chats || [];
+        const existingChat = currentUserChats.find(chat => chat.receiverId === userId);
+        
+        if (existingChat) {
+          if (existingChat.clearHistoryFrom) {
+            setChatStatus('cleared');
+          } else {
+            setChatStatus('exists');
+          }
+        } else {
+          setChatStatus('none');
+        }
+      } else {
+        setChatStatus('none');
+      }
+    } catch (error) {
+      console.log("Error checking chat status:", error);
+      setChatStatus('none');
+    }
+  };
+
+  // Function bắt đầu chat với user đã kết bạn
+  const handleStartChat = async () => {
+    if (!user) return;
+    
+    try {
+      const userChatsRef = doc(db, "userchats", currentUser.id);
+      const userChatsDoc = await getDoc(userChatsRef);
+      
+      if (userChatsDoc.exists()) {
+        const currentUserChats = userChatsDoc.data().chats || [];
+        const existingChat = currentUserChats.find(chat => chat.receiverId === user.id);
+        
+        if (existingChat) {
+          // Select chat và đóng add modal
+          if (existingChat.isGroup) {
+            changeChat(existingChat.chatId, null, {
+              isGroup: true,
+              groupName: existingChat.groupName,
+              groupAdmin: existingChat.groupAdmin,
+              members: existingChat.members
+            });
+          } else {
+            changeChat(existingChat.chatId, user);
+          }
+          setAddMode(false);
+          toast.success(`Đã mở chat với ${user.username}`);
+        }
+      }
+    } catch (error) {
+      console.log("Error starting chat:", error);
+      toast.error("Không thể mở chat");
+    }
+  };
+
   // Function thêm user và tạo chat mới
   const handleAdd = async () => {
     if (!user) {
@@ -91,6 +160,34 @@ const AddUser = ({ setAddMode }) => {
     try {
       const chatRef = collection(db, "chats");
       const userChatsRef = collection(db, "userchats");
+
+      // Kiểm tra xem chat với user này đã tồn tại chưa
+      const currentUserChatsRef = doc(userChatsRef, currentUser.id);
+      const currentUserChatsDoc = await getDoc(currentUserChatsRef);
+      
+      if (currentUserChatsDoc.exists()) {
+        const currentUserChats = currentUserChatsDoc.data().chats || [];
+        const existingChat = currentUserChats.find(chat => 
+          chat.receiverId === user.id && !chat.clearHistoryFrom
+        );
+        
+        if (existingChat) {
+          toast.error(`Cuộc trò chuyện với ${user.username} đã tồn tại!`);
+          return;
+        }
+        
+        // Kiểm tra cả chat đã clear history (có thể restore)
+        const clearedChat = currentUserChats.find(chat => 
+          chat.receiverId === user.id && chat.clearHistoryFrom
+        );
+        
+        if (clearedChat) {
+          toast.info(`Cuộc trò chuyện với ${user.username} đã tồn tại (đã xóa lịch sử). Bạn có thể gửi tin nhắn để khôi phục.`);
+          setUser(null);
+          setTimeout(() => setAddMode(false), 1500);
+          return;
+        }
+      }
 
       // Kiểm tra và tạo userchats document cho target user nếu chưa có
       try {
@@ -156,8 +253,9 @@ const AddUser = ({ setAddMode }) => {
         }),
       });
 
-      toast.success(`Chat created with ${user.username}!`);
+      toast.success(`Đã kết bạn với ${user.username}!`);
       setUser(null);
+      setChatStatus(null);
 
       setTimeout(() => {
         setAddMode(false);
@@ -289,12 +387,29 @@ const AddUser = ({ setAddMode }) => {
                   </p>
                 </div>
               </div>
-              <button
-                onClick={handleAdd}
-                className="rounded-lg bg-green-500 px-4 py-2 font-medium text-white transition-colors hover:bg-green-600"
-              >
-                Add
-              </button>
+              {/* Button hiển thị theo trạng thái chat */}
+              {chatStatus === 'exists' ? (
+                <button
+                  onClick={handleStartChat}
+                  className="rounded-lg bg-blue-500 px-4 py-2 font-medium text-white transition-colors hover:bg-blue-600"
+                >
+                  Nhắn tin
+                </button>
+              ) : chatStatus === 'cleared' ? (
+                <button
+                  onClick={handleStartChat}
+                  className="rounded-lg bg-yellow-500 px-4 py-2 font-medium text-white transition-colors hover:bg-yellow-600"
+                >
+                  Khôi phục chat
+                </button>
+              ) : (
+                <button
+                  onClick={handleAdd}
+                  className="rounded-lg bg-green-500 px-4 py-2 font-medium text-white transition-colors hover:bg-green-600"
+                >
+                  Kết bạn
+                </button>
+              )}
             </div>
           </div>
         )}
